@@ -1,0 +1,486 @@
+import 'dart:io';
+import 'package:shelf/shelf.dart';
+import 'package:shelf/shelf_io.dart' as io;
+import 'package:shelf_router/shelf_router.dart';
+import 'package:dotenv/dotenv.dart';
+import 'dart:convert'; // Добавляем для JSON
+
+import '../lib/database.dart';
+
+void main(List<String> args) async {
+  print('🚀 Запуск сервера...');
+
+  try {
+    // Подключаемся к базе данных
+    await Database.connect();
+
+    final router = Router();
+
+    router.get('/', (Request request) {
+      return Response.ok(
+        'Стоматологический сервер работает! 🦷\n'
+        'Доступные endpoints:\n'
+        '  GET /health - проверка работы сервера и БД\n'
+        '  GET /test - проверка данных пациентов\n'
+        '  GET /patients - список пациентов (JSON)',
+        headers: {'Content-Type': 'text/plain; charset=utf-8'},
+      );
+    });
+
+    router.get('/health', (Request request) async {
+      try {
+        final result =
+            await Database.connection.query('SELECT 1 as test_value');
+        return Response.ok(
+          '✅ Сервер и БД работают\nТестовое значение: ${result[0][0]}',
+          headers: {'Content-Type': 'text/plain; charset=utf-8'},
+        );
+      } catch (e) {
+        return Response.internalServerError(
+          body: '❌ Ошибка БД: $e',
+          headers: {'Content-Type': 'text/plain; charset=utf-8'},
+        );
+      }
+    });
+
+    // Endpoint для проверки данных пациентов
+    router.get('/test', (Request request) async {
+      try {
+        final result =
+            await Database.connection.query('SELECT * FROM "Flaunetr"');
+        return Response.ok(
+          'Найдено пациентов: ${result.length}\nДанные: $result',
+          headers: {'Content-Type': 'text/plain; charset=utf-8'},
+        );
+      } catch (e) {
+        return Response.internalServerError(body: 'Ошибка: $e');
+      }
+    });
+
+    // Endpoint для получения пациентов в JSON формате
+    router.get('/patients', (Request request) async {
+      try {
+        final result =
+            await Database.connection.query('SELECT * FROM "Flaunetr"');
+
+        final patients = result.map((row) {
+          return {
+            'medical_card_id': row[0],
+            'age': row[1],
+            'full_name': row[2],
+            'phone': row[3],
+            'oma_policy': row[4],
+            'snls': row[5],
+          };
+        }).toList();
+
+        return Response.ok(
+          json.encode(patients),
+          headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Access-Control-Allow-Origin': '*', // CORS для Flutter Web
+          },
+        );
+      } catch (e) {
+        return Response.internalServerError(
+          body: json.encode({'error': 'Database error: $e'}),
+          headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Access-Control-Allow-Origin': '*',
+          },
+        );
+      }
+    });
+
+    // Добавь в server.dart после других endpoints
+    router.get('/tables', (Request request) async {
+      try {
+        final result = await Database.connection.query('''
+      SELECT table_name 
+      FROM information_schema.tables 
+      WHERE table_schema = 'public'
+    ''');
+
+        final tableNames = result.map((row) => row[0] as String).toList();
+        return Response.ok(
+          json.encode({'tables': tableNames, 'count': tableNames.length}),
+          headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Access-Control-Allow-Origin': '*',
+          },
+        );
+      } catch (e) {
+        return Response.internalServerError(
+          body: json.encode({'error': 'Failed to fetch tables: $e'}),
+          headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Access-Control-Allow-Origin': '*',
+          },
+        );
+      }
+    });
+
+    // Добавь в server.dart
+    router.get('/init-db', (Request request) async {
+      try {
+        // Создаем таблицу пациентов
+        await Database.connection.query('''
+      CREATE TABLE IF NOT EXISTS "Flaunetr" (
+        medical_card_id SERIAL PRIMARY KEY,
+        age INTEGER,
+        full_name CHARACTER VARYING(100),
+        phone CHARACTER VARYING(11),
+        oma_policy CHARACTER VARYING(20),
+        snls CHARACTER VARYING(15)
+      )
+    ''');
+
+        // Создаем таблицу медицинских записей
+        await Database.connection.query('''
+      CREATE TABLE IF NOT EXISTS "Samись_ua_npnew" (
+        record_id SERIAL PRIMARY KEY,
+        medical_card_id INTEGER,
+        total_amount NUMERIC(10,2),
+        datetime TIMESTAMP WITHOUT TIME ZONE,
+        record_type CHARACTER VARYING(50),
+        complaints TEXT,
+        work_result TEXT
+      )
+    ''');
+
+        // Добавляем тестовые данные
+        await Database.connection.query('''
+      INSERT INTO "Flaunetr" (age, full_name, phone, oma_policy, snls) 
+      VALUES 
+        (25, 'Иванов Алексей Петрович', '79161234567', '12345678901234567890', '123456789012345'),
+        (34, 'Петрова Мария Сергеевна', '79037654321', '09876543210987654321', '098765432109876'),
+        (42, 'Сидоров Дмитрий Иванович', '79219876543', '11223344556677889900', '112233445566778')
+      ON CONFLICT DO NOTHING
+    ''');
+
+        return Response.ok(
+          json.encode({'message': 'База данных инициализирована успешно!'}),
+          headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Access-Control-Allow-Origin': '*',
+          },
+        );
+      } catch (e) {
+        return Response.internalServerError(
+          body: json.encode({'error': 'Failed to init database: $e'}),
+          headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Access-Control-Allow-Origin': '*',
+          },
+        );
+      }
+    });
+
+    // Endpoint для удаления пациента
+    router.delete('/patients/<id>', (Request request, String id) async {
+      try {
+        final medicalCardId = int.tryParse(id);
+        if (medicalCardId == null) {
+          return Response.badRequest(
+            body: json.encode({'error': 'Неверный ID пациента'}),
+            headers: {
+              'Content-Type': 'application/json; charset=utf-8',
+              'Access-Control-Allow-Origin': '*',
+            },
+          );
+        }
+
+        final result = await Database.connection.query(
+          'DELETE FROM "Flaunetr" WHERE medical_card_id = @id',
+          substitutionValues: {'id': medicalCardId},
+        );
+
+        if (result.affectedRowCount > 0) {
+          return Response.ok(
+            json.encode({'message': 'Пациент успешно удален'}),
+            headers: {
+              'Content-Type': 'application/json; charset=utf-8',
+              'Access-Control-Allow-Origin': '*',
+            },
+          );
+        } else {
+          return Response.notFound(
+            json.encode({'error': 'Пациент не найден'}),
+            headers: {
+              'Content-Type': 'application/json; charset=utf-8',
+              'Access-Control-Allow-Origin': '*',
+            },
+          );
+        }
+      } catch (e) {
+        return Response.internalServerError(
+          body: json.encode({'error': 'Ошибка при удалении пациента: $e'}),
+          headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Access-Control-Allow-Origin': '*',
+          },
+        );
+      }
+    });
+
+    // Добавь эти endpoints в server.dart
+
+// Endpoint для обновления пациента
+    router.put('/patients/<id>', (Request request, String id) async {
+      try {
+        final medicalCardId = int.tryParse(id);
+        if (medicalCardId == null) {
+          return Response.badRequest(
+            body: json.encode({'error': 'Неверный ID пациента'}),
+            headers: {
+              'Content-Type': 'application/json; charset=utf-8',
+              'Access-Control-Allow-Origin': '*',
+            },
+          );
+        }
+
+        final body = await request.readAsString();
+        final patientData = json.decode(body) as Map<String, dynamic>;
+
+        // Валидация обязательных полей
+        if (patientData['full_name'] == null ||
+            patientData['full_name'].toString().isEmpty) {
+          return Response.badRequest(
+            body: json.encode({'error': 'ФИО обязательно для заполнения'}),
+            headers: {
+              'Content-Type': 'application/json; charset=utf-8',
+              'Access-Control-Allow-Origin': '*',
+            },
+          );
+        }
+
+        // Обновляем данные в базе
+        final result = await Database.connection.query(
+          '''
+      UPDATE "Flaunetr" 
+      SET age = @age, 
+          full_name = @full_name, 
+          phone = @phone, 
+          oma_policy = @oma_policy, 
+          snls = @snls,
+          photo_base64 = @photo_base64
+      WHERE medical_card_id = @id
+      RETURNING medical_card_id
+      ''',
+          substitutionValues: {
+            'id': medicalCardId,
+            'age': patientData['age'] ?? 0,
+            'full_name': patientData['full_name'],
+            'phone': patientData['phone'] ?? '',
+            'oma_policy': patientData['oma_policy'] ?? '',
+            'snls': patientData['snls'] ?? '',
+            'photo_base64': patientData['photo_base64'],
+          },
+        );
+
+        if (result.affectedRowCount > 0) {
+          return Response.ok(
+            json.encode({
+              'message': 'Пациент успешно обновлен',
+              'medical_card_id': result[0][0],
+            }),
+            headers: {
+              'Content-Type': 'application/json; charset=utf-8',
+              'Access-Control-Allow-Origin': '*',
+            },
+          );
+        } else {
+          return Response.notFound(
+            json.encode({'error': 'Пациент не найден'}),
+            headers: {
+              'Content-Type': 'application/json; charset=utf-8',
+              'Access-Control-Allow-Origin': '*',
+            },
+          );
+        }
+      } catch (e) {
+        return Response.internalServerError(
+          body: json.encode({'error': 'Ошибка при обновлении пациента: $e'}),
+          headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Access-Control-Allow-Origin': '*',
+          },
+        );
+      }
+    });
+
+// Endpoint для загрузки фото пациента
+    router.put('/patients/<id>/photo', (Request request, String id) async {
+      try {
+        final medicalCardId = int.tryParse(id);
+        if (medicalCardId == null) {
+          return Response.badRequest(
+            body: json.encode({'error': 'Неверный ID пациента'}),
+            headers: {
+              'Content-Type': 'application/json; charset=utf-8',
+              'Access-Control-Allow-Origin': '*',
+            },
+          );
+        }
+
+        final body = await request.readAsString();
+        final photoData = json.decode(body) as Map<String, dynamic>;
+
+        if (photoData['photo_base64'] == null) {
+          return Response.badRequest(
+            body: json.encode({'error': 'Фото обязательно'}),
+            headers: {
+              'Content-Type': 'application/json; charset=utf-8',
+              'Access-Control-Allow-Origin': '*',
+            },
+          );
+        }
+
+        // Обновляем только фото
+        final result = await Database.connection.query(
+          'UPDATE "Flaunetr" SET photo_base64 = @photo_base64 WHERE medical_card_id = @id',
+          substitutionValues: {
+            'id': medicalCardId,
+            'photo_base64': photoData['photo_base64'],
+          },
+        );
+
+        if (result.affectedRowCount > 0) {
+          return Response.ok(
+            json.encode({'message': 'Фото успешно обновлено'}),
+            headers: {
+              'Content-Type': 'application/json; charset=utf-8',
+              'Access-Control-Allow-Origin': '*',
+            },
+          );
+        } else {
+          return Response.notFound(
+            json.encode({'error': 'Пациент не найден'}),
+            headers: {
+              'Content-Type': 'application/json; charset=utf-8',
+              'Access-Control-Allow-Origin': '*',
+            },
+          );
+        }
+      } catch (e) {
+        return Response.internalServerError(
+          body: json.encode({'error': 'Ошибка при обновлении фото: $e'}),
+          headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Access-Control-Allow-Origin': '*',
+          },
+        );
+      }
+    });
+
+    // Добавь в server.dart после GET /patients
+    router.post('/patients', (Request request) async {
+      try {
+        final body = await request.readAsString();
+        final patientData = json.decode(body) as Map<String, dynamic>;
+
+        // Валидация обязательных полей
+        if (patientData['full_name'] == null ||
+            patientData['full_name'].toString().isEmpty) {
+          return Response.badRequest(
+            body: json.encode({'error': 'ФИО обязательно для заполнения'}),
+            headers: {
+              'Content-Type': 'application/json; charset=utf-8',
+              'Access-Control-Allow-Origin': '*',
+            },
+          );
+        }
+
+        // Вставляем данные в базу
+        final result = await Database.connection.query(
+          '''
+      INSERT INTO "Flaunetr" (age, full_name, phone, oma_policy, snls)
+      VALUES (@age, @full_name, @phone, @oma_policy, @snls)
+      RETURNING medical_card_id
+      ''',
+          substitutionValues: {
+            'age': patientData['age'] ?? 0,
+            'full_name': patientData['full_name'],
+            'phone': patientData['phone'] ?? '',
+            'oma_policy': patientData['oma_policy'] ?? '',
+            'snls': patientData['snls'] ?? '',
+          },
+        );
+
+        return Response.ok(
+          json.encode({
+            'message': 'Пациент успешно добавлен',
+            'medical_card_id': result[0][0],
+          }),
+          headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Access-Control-Allow-Origin': '*',
+          },
+        );
+      } catch (e) {
+        return Response.internalServerError(
+          body: json.encode({'error': 'Ошибка при добавлении пациента: $e'}),
+          headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Access-Control-Allow-Origin': '*',
+          },
+        );
+      }
+    });
+
+    // Добавляем CORS middleware
+    final handler =
+        const Pipeline().addMiddleware(_corsHeaders()).addHandler(router);
+
+    // Получаем порт из .env или используем 8080
+    final env = DotEnv()..load();
+    final port = int.tryParse(env['SERVER_PORT'] ?? '8080') ?? 8080;
+
+    // Пробуем разные порты, если основной занят
+    var server = await _startServer(handler, port);
+
+    print('🎯 Сервер запущен на http://localhost:${server.port}');
+    print('📋 Доступные endpoints:');
+    print('   GET / - главная страница');
+    print('   GET /health - проверка здоровья');
+    print('   GET /test - проверка данных пациентов');
+    print('   GET /patients - список пациентов (JSON)');
+  } catch (e) {
+    print('💥 Критическая ошибка: $e');
+    exit(1);
+  }
+}
+
+Future<HttpServer> _startServer(Handler handler, int preferredPort) async {
+  try {
+    return await io.serve(handler, 'localhost', preferredPort);
+  } catch (e) {
+    if (e is SocketException && e.osError?.errorCode == 10048) {
+      print('⚠️  Порт $preferredPort занят, пробую порт ${preferredPort + 1}');
+      return await io.serve(handler, 'localhost', preferredPort + 1);
+    }
+    rethrow;
+  }
+}
+
+// CORS middleware для работы с Flutter Web
+Middleware _corsHeaders() {
+  return (Handler innerHandler) {
+    return (Request request) async {
+      // Добавляем CORS заголовки к каждому запросу
+      if (request.method == 'OPTIONS') {
+        return Response.ok('', headers: _corsHeaderMap);
+      }
+
+      final Response response = await innerHandler(request);
+      return response.change(headers: _corsHeaderMap);
+    };
+  };
+}
+
+Map<String, String> get _corsHeaderMap => {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+      'Access-Control-Allow-Headers': 'Origin, Content-Type, Authorization',
+      'Access-Control-Allow-Credentials': 'true',
+    };
